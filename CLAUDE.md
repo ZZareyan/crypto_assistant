@@ -100,11 +100,44 @@ docker compose up --build        # everything
 - **Pydantic schemas and SQLAlchemy models are always separate** — routers return schema instances, never ORM objects.
 - **Redis cache-aside** is the pattern for the hot endpoints once wired: TTL 5 min for market data, 1 hour for price history.
 
+## Crawler (`crawler/`)
+
+Standalone Python service that fetches crypto news from YouTube and RSS feeds and persists items to the shared PostgreSQL database. Currently configured with **59 YouTube searches** and **55 RSS feeds**.
+
+### How sources work
+
+Every source is a dataclass defined in `crawler/app/sources/registry.py`. **To add a new source, add an entry to `YOUTUBE_SEARCHES` or `RSS_FEEDS` — that is the only file you need to touch.**
+
+- `YoutubeSearchSource(name, query, coin_tags, channel_id, max_results, interval_minutes)` — calls YouTube Data API v3 `/search`. Set `channel_id` to restrict results to a specific channel. Requires `YOUTUBE_API_KEY`; skips silently if missing.
+- `RSSSource(name, url, coin_tags, interval_minutes)` — fetches feed with httpx, parses with feedparser, strips HTML summaries with BeautifulSoup.
+
+The scheduler (`app/scheduler.py`) registers one APScheduler job per source and fires each job immediately on startup (`next_run_time=now`), then on the configured interval.
+
+### Deduplication
+
+All items are upserted via `INSERT ... ON CONFLICT DO NOTHING` on the `(source_type, external_id)` unique constraint (`uq_news_item_source_external`). Re-running a crawl on the same feed is safe and idempotent.
+
+### Database isolation
+
+The crawler manages only the `news_items` table. Its `alembic/env.py` sets `include_name` to filter out all other tables, so `alembic autogenerate` will never touch the backend's schema.
+
+### Commands (run from `crawler/`)
+
+```bash
+uv sync
+uv run alembic upgrade head               # create news_items table
+uv run python -m app.main                 # run crawler locally
+
+uv run pytest tests/ -v
+uv run ruff check app --fix
+uv run mypy app
+```
+
 ## Code Style
 
 ### Python
 
-Config in `backend/pyproject.toml`. Ruff is the formatter and primary linter. Pylint is for CI deep analysis. Mypy `strict = true` with the `pydantic.mypy` plugin. Every function must have annotated parameters and return type.
+Both `backend/pyproject.toml` and `crawler/pyproject.toml` carry identical tool config. Ruff is the formatter and primary linter. Pylint is for CI deep analysis. Mypy runs `strict = true`; the backend additionally enables `pydantic.mypy` plugin (crawler does not use Pydantic models). Every function must have annotated parameters and return type.
 
 ### TypeScript
 
